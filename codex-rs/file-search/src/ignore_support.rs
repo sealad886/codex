@@ -4,11 +4,14 @@
 //! and `.aiignore` (alias) files with gitignore-compatible semantics. The system implements
 //! a clear precedence hierarchy: system < user < project-root < nested directories.
 
-use std::path::{Path, PathBuf};
+use anyhow::Context;
+use anyhow::Result;
+use ignore::gitignore::Gitignore;
+use ignore::gitignore::GitignoreBuilder;
 use std::collections::HashMap;
 use std::env;
-use anyhow::{Result, Context};
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::path::Path;
+use std::path::PathBuf;
 
 /// The family/type of ignore file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,7 +110,7 @@ impl IgnoreMatcher {
     fn build_matchers(&mut self) -> Result<()> {
         // Group sources by directory
         let mut by_dir: HashMap<PathBuf, Vec<&IgnoreSource>> = HashMap::new();
-        
+
         for source in &self.sources {
             by_dir.entry(source.dir.clone()).or_default().push(source);
         }
@@ -115,34 +118,36 @@ impl IgnoreMatcher {
         // Build a matcher for each directory
         for (dir, dir_sources) in by_dir {
             let mut builder = GitignoreBuilder::new(&self.root);
-            
+
             // Sort sources by order to ensure stable precedence
             let mut sorted_sources = dir_sources;
             sorted_sources.sort_by_key(|s| s.order);
-            
+
             // Add each ignore file to the builder
             for source in sorted_sources {
                 if source.file_path.exists() {
                     builder.add(&source.file_path);
                 }
             }
-            
-            let gitignore = builder.build().context("Failed to build gitignore matcher")?;
+
+            let gitignore = builder
+                .build()
+                .context("Failed to build gitignore matcher")?;
             self.matchers.insert(dir, gitignore);
         }
-        
+
         Ok(())
     }
 
     /// Check if a path should be ignored
-    /// 
+    ///
     /// Returns true if the path should be ignored, false if it should be included.
     pub fn matches(&self, rel_path: &Path, is_dir: bool) -> bool {
         // Find the most specific directory matcher for this path
         let path_absolute = self.root.join(rel_path);
         let mut best_matcher = None;
         let mut best_dir = PathBuf::new();
-        
+
         for (dir, matcher) in &self.matchers {
             if dir.as_os_str().is_empty() || path_absolute.starts_with(dir) {
                 if dir.components().count() > best_dir.components().count() {
@@ -151,7 +156,7 @@ impl IgnoreMatcher {
                 }
             }
         }
-        
+
         if let Some(matcher) = best_matcher {
             match matcher.matched(rel_path, is_dir) {
                 ignore::Match::None => false,
@@ -165,10 +170,10 @@ impl IgnoreMatcher {
 
     /// Get detailed explanation of why a path matched or didn't match
     pub fn explain(&self, rel_path: &Path, is_dir: bool) -> Vec<ExplainStep> {
-        // This is a simplified implementation - a full implementation would 
+        // This is a simplified implementation - a full implementation would
         // need to parse each ignore file and track individual pattern matches
         let matched = self.matches(rel_path, is_dir);
-        
+
         // For now, return a simple explanation
         if matched {
             vec![ExplainStep {
@@ -176,13 +181,17 @@ impl IgnoreMatcher {
                 pattern: "**".to_string(), // Placeholder
                 negated: false,
                 line: 1,
-                source: self.sources.first().cloned().unwrap_or_else(|| IgnoreSource {
-                    file_path: PathBuf::from("unknown"),
-                    family: Family::Codex,
-                    scope: Scope::Directory,
-                    dir: PathBuf::new(),
-                    order: 0,
-                }),
+                source: self
+                    .sources
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| IgnoreSource {
+                        file_path: PathBuf::from("unknown"),
+                        family: Family::Codex,
+                        scope: Scope::Directory,
+                        dir: PathBuf::new(),
+                        order: 0,
+                    }),
             }]
         } else {
             vec![]
@@ -237,9 +246,9 @@ impl IgnoreDiscovery {
         let ai_disabled = env::var("AI_IGNORE_DISABLE").is_ok_and(|v| v == "1");
         let codex_disabled = env::var("CODEX_IGNORE_DISABLE").is_ok_and(|v| v == "1");
         let all_disabled = env::var("CODEX_NO_IGNORE").is_ok_and(|v| v == "1");
-        
+
         let mut additional_files = Vec::new();
-        
+
         // Handle AI_IGNORE_FILE environment variable
         if let Ok(files) = env::var("AI_IGNORE_FILE") {
             for file_path in files.split(',') {
@@ -249,7 +258,7 @@ impl IgnoreDiscovery {
                 }
             }
         }
-        
+
         // Handle CODEX_IGNORE_FILE environment variable
         if let Ok(files) = env::var("CODEX_IGNORE_FILE") {
             for file_path in files.split(',') {
@@ -259,7 +268,43 @@ impl IgnoreDiscovery {
                 }
             }
         }
-        
+
+        Self {
+            ai_disabled,
+            codex_disabled,
+            all_disabled,
+            additional_files,
+        }
+    }
+
+    /// Create a new IgnoreDiscovery with explicit family controls
+    pub fn with_controls(ai_disabled: bool, codex_disabled: bool, all_disabled: bool) -> Self {
+        let mut additional_files = Vec::new();
+
+        // Handle AI_IGNORE_FILE environment variable
+        if !ai_disabled && !all_disabled {
+            if let Ok(files) = env::var("AI_IGNORE_FILE") {
+                for file_path in files.split(',') {
+                    let path = PathBuf::from(file_path.trim());
+                    if path.is_absolute() {
+                        additional_files.push((Family::Ai, path));
+                    }
+                }
+            }
+        }
+
+        // Handle CODEX_IGNORE_FILE environment variable
+        if !codex_disabled && !all_disabled {
+            if let Ok(files) = env::var("CODEX_IGNORE_FILE") {
+                for file_path in files.split(',') {
+                    let path = PathBuf::from(file_path.trim());
+                    if path.is_absolute() {
+                        additional_files.push((Family::Codex, path));
+                    }
+                }
+            }
+        }
+
         Self {
             ai_disabled,
             codex_disabled,
@@ -273,10 +318,10 @@ impl IgnoreDiscovery {
         if self.all_disabled {
             return Ok(vec![]);
         }
-        
+
         let mut sources = Vec::new();
         let mut order = 0;
-        
+
         // 1. System global files
         if !self.ai_disabled {
             sources.extend(self.discover_system_global(Family::Ai, &mut order)?);
@@ -284,33 +329,45 @@ impl IgnoreDiscovery {
         if !self.codex_disabled {
             sources.extend(self.discover_system_global(Family::Codex, &mut order)?);
         }
-        
-        // 2. User global files  
+
+        // 2. User global files
         if !self.ai_disabled {
             sources.extend(self.discover_user_global(Family::Ai, &mut order)?);
         }
         if !self.codex_disabled {
             sources.extend(self.discover_user_global(Family::Codex, &mut order)?);
         }
-        
+
         // 3. Project root files
         if !self.ai_disabled {
-            if let Some(source) = self.discover_project_file(project_root, Family::Ai, Scope::ProjectRoot, &mut order)? {
+            if let Some(source) = self.discover_project_file(
+                project_root,
+                Family::Ai,
+                Scope::ProjectRoot,
+                &mut order,
+            )? {
                 sources.push(source);
             }
         }
         if !self.codex_disabled {
-            if let Some(source) = self.discover_project_file(project_root, Family::Codex, Scope::ProjectRoot, &mut order)? {
+            if let Some(source) = self.discover_project_file(
+                project_root,
+                Family::Codex,
+                Scope::ProjectRoot,
+                &mut order,
+            )? {
                 sources.push(source);
             }
         }
-        
+
         // 4. Additional files from environment/CLI
         for (family, path) in &self.additional_files {
-            if (*family == Family::Ai && self.ai_disabled) || (*family == Family::Codex && self.codex_disabled) {
+            if (*family == Family::Ai && self.ai_disabled)
+                || (*family == Family::Codex && self.codex_disabled)
+            {
                 continue;
             }
-            
+
             sources.push(IgnoreSource {
                 file_path: path.clone(),
                 family: *family,
@@ -320,37 +377,50 @@ impl IgnoreDiscovery {
             });
             order += 1;
         }
-        
+
         Ok(sources)
     }
 
     /// Discover ignore files for a specific directory (used during traversal)
-    pub fn discover_for_directory(&self, dir: &Path, _project_root: &Path, order: &mut usize) -> Result<Vec<IgnoreSource>> {
+    pub fn discover_for_directory(
+        &self,
+        dir: &Path,
+        _project_root: &Path,
+        order: &mut usize,
+    ) -> Result<Vec<IgnoreSource>> {
         if self.all_disabled {
             return Ok(vec![]);
         }
-        
+
         let mut sources = Vec::new();
-        
+
         // Add .aiignore then .codexignore for this directory
         if !self.ai_disabled {
-            if let Some(source) = self.discover_project_file(dir, Family::Ai, Scope::Directory, order)? {
+            if let Some(source) =
+                self.discover_project_file(dir, Family::Ai, Scope::Directory, order)?
+            {
                 sources.push(source);
             }
         }
         if !self.codex_disabled {
-            if let Some(source) = self.discover_project_file(dir, Family::Codex, Scope::Directory, order)? {
+            if let Some(source) =
+                self.discover_project_file(dir, Family::Codex, Scope::Directory, order)?
+            {
                 sources.push(source);
             }
         }
-        
+
         Ok(sources)
     }
 
-    fn discover_system_global(&self, family: Family, order: &mut usize) -> Result<Vec<IgnoreSource>> {
+    fn discover_system_global(
+        &self,
+        family: Family,
+        order: &mut usize,
+    ) -> Result<Vec<IgnoreSource>> {
         let mut sources = Vec::new();
         let paths = self.get_system_global_paths(family);
-        
+
         for path in paths {
             if path.exists() {
                 sources.push(IgnoreSource {
@@ -363,14 +433,14 @@ impl IgnoreDiscovery {
                 *order += 1;
             }
         }
-        
+
         Ok(sources)
     }
 
     fn discover_user_global(&self, family: Family, order: &mut usize) -> Result<Vec<IgnoreSource>> {
         let mut sources = Vec::new();
         let paths = self.get_user_global_paths(family);
-        
+
         for path in paths {
             if path.exists() {
                 sources.push(IgnoreSource {
@@ -383,11 +453,17 @@ impl IgnoreDiscovery {
                 *order += 1;
             }
         }
-        
+
         Ok(sources)
     }
 
-    fn discover_project_file(&self, dir: &Path, family: Family, scope: Scope, order: &mut usize) -> Result<Option<IgnoreSource>> {
+    fn discover_project_file(
+        &self,
+        dir: &Path,
+        family: Family,
+        scope: Scope,
+        order: &mut usize,
+    ) -> Result<Option<IgnoreSource>> {
         let path = dir.join(family.filename());
         if path.exists() {
             let source = IgnoreSource {
@@ -406,20 +482,16 @@ impl IgnoreDiscovery {
 
     fn get_system_global_paths(&self, family: Family) -> Vec<PathBuf> {
         let prefix = family.env_prefix().to_lowercase();
-        
+
         #[cfg(unix)]
         {
-            vec![
-                PathBuf::from(format!("/etc/{}/ignore", prefix)),
-            ]
+            vec![PathBuf::from(format!("/etc/{}/ignore", prefix))]
         }
-        
+
         #[cfg(windows)]
         {
             if let Ok(program_data) = env::var("ProgramData") {
-                vec![
-                    PathBuf::from(program_data).join(prefix).join("ignore"),
-                ]
+                vec![PathBuf::from(program_data).join(prefix).join("ignore")]
             } else {
                 vec![]
             }
@@ -428,29 +500,26 @@ impl IgnoreDiscovery {
 
     fn get_user_global_paths(&self, family: Family) -> Vec<PathBuf> {
         let prefix = family.env_prefix().to_lowercase();
-        
+
         #[cfg(unix)]
         {
-            let config_home = env::var("XDG_CONFIG_HOME")
-                .unwrap_or_else(|_| {
-                    env::var("HOME").map(|h| format!("{}/.config", h)).unwrap_or_default()
-                });
-            
+            let config_home = env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                env::var("HOME")
+                    .map(|h| format!("{}/.config", h))
+                    .unwrap_or_default()
+            });
+
             if !config_home.is_empty() {
-                vec![
-                    PathBuf::from(config_home).join(prefix).join("ignore"),
-                ]
+                vec![PathBuf::from(config_home).join(prefix).join("ignore")]
             } else {
                 vec![]
             }
         }
-        
+
         #[cfg(windows)]
         {
             if let Ok(app_data) = env::var("AppData") {
-                vec![
-                    PathBuf::from(app_data).join(prefix).join("ignore"),
-                ]
+                vec![PathBuf::from(app_data).join(prefix).join("ignore")]
             } else {
                 vec![]
             }
@@ -468,8 +537,8 @@ pub fn create_ignore_matcher(project_root: &Path) -> Result<IgnoreMatcher> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_family_filename() {
@@ -494,43 +563,50 @@ mod tests {
     fn test_discover_project_files() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let root = temp_dir.path();
-        
+
         // Create test ignore files
         fs::write(root.join(".aiignore"), "*.tmp\n")?;
         fs::write(root.join(".codexignore"), "*.log\n")?;
-        
+
         let discovery = IgnoreDiscovery::new();
         let sources = discovery.discover(root)?;
-        
+
         // Should find both files, with proper ordering (ai first, then codex)
-        let project_sources: Vec<_> = sources.iter()
+        let project_sources: Vec<_> = sources
+            .iter()
             .filter(|s| s.scope == Scope::ProjectRoot)
             .collect();
-        
+
         assert_eq!(project_sources.len(), 2);
-        
+
         // AI should come before Codex in the ordering
-        let ai_source = project_sources.iter().find(|s| s.family == Family::Ai).unwrap();
-        let codex_source = project_sources.iter().find(|s| s.family == Family::Codex).unwrap();
+        let ai_source = project_sources
+            .iter()
+            .find(|s| s.family == Family::Ai)
+            .unwrap();
+        let codex_source = project_sources
+            .iter()
+            .find(|s| s.family == Family::Codex)
+            .unwrap();
         assert!(ai_source.order < codex_source.order);
-        
+
         Ok(())
     }
 
-    #[test] 
+    #[test]
     fn test_ignore_matcher_basic() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let root = temp_dir.path();
-        
+
         // Create a simple .codexignore file
         fs::write(root.join(".codexignore"), "*.tmp\n")?;
-        
+
         let matcher = create_ignore_matcher(root)?;
-        
+
         // Test that .tmp files are ignored
         assert!(matcher.matches(Path::new("test.tmp"), false));
         assert!(!matcher.matches(Path::new("test.txt"), false));
-        
+
         Ok(())
     }
 }

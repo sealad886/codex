@@ -22,7 +22,7 @@ mod cli;
 mod ignore_support;
 
 pub use cli::Cli;
-use ignore_support::{create_ignore_matcher, IgnoreMatcher};
+use std::path::PathBuf;
 
 /// A single match result returned from the search.
 ///
@@ -62,6 +62,12 @@ pub async fn run_main<T: Reporter>(
         json: _,
         exclude,
         threads,
+        ignore_file,
+        no_ignore,
+        only_codexignore,
+        only_aiignore,
+        print_effective_ignore,
+        explain_ignore,
     }: Cli,
     reporter: T,
 ) -> anyhow::Result<()> {
@@ -69,6 +75,73 @@ pub async fn run_main<T: Reporter>(
         Some(dir) => dir,
         None => std::env::current_dir()?,
     };
+
+    // Handle --explain-ignore flag
+    if let Some(path_to_explain) = explain_ignore {
+        let ignore_matcher = create_ignore_matcher_with_options(
+            &search_directory,
+            &ignore_file,
+            no_ignore,
+            only_codexignore,
+            only_aiignore,
+        )?;
+
+        if let Some(matcher) = ignore_matcher {
+            let rel_path = if path_to_explain.is_absolute() {
+                path_to_explain
+                    .strip_prefix(&search_directory)
+                    .unwrap_or(&path_to_explain)
+            } else {
+                &path_to_explain
+            };
+
+            let is_dir = search_directory.join(&rel_path).is_dir();
+            let is_ignored = matcher.matches(rel_path, is_dir);
+
+            println!("Path: {}", rel_path.display());
+            println!("Ignored: {}", is_ignored);
+            // TODO: Add detailed explanation with ExplainStep
+            return Ok(());
+        } else {
+            println!("Path: {}", path_to_explain.display());
+            println!("Ignored: false (no ignore rules active)");
+            return Ok(());
+        }
+    }
+
+    // Handle --print-effective-ignore flag
+    if print_effective_ignore {
+        let ignore_matcher = create_ignore_matcher_with_options(
+            &search_directory,
+            &ignore_file,
+            no_ignore,
+            only_codexignore,
+            only_aiignore,
+        )?;
+
+        if let Some(matcher) = ignore_matcher {
+            println!("Effective ignore rules (in precedence order):");
+            println!("ORDER | FAMILY | SCOPE        | FILE PATH");
+            println!("------|--------|--------------|----------");
+
+            for (i, source) in matcher.sources().iter().enumerate() {
+                println!(
+                    "{:05} | {:6} | {:12} | {}",
+                    i + 1,
+                    match source.family {
+                        ignore_support::Family::Ai => "ai",
+                        ignore_support::Family::Codex => "codex",
+                    },
+                    format!("{:?}", source.scope).to_lowercase(),
+                    source.file_path.display()
+                );
+            }
+        } else {
+            println!("No ignore rules active.");
+        }
+        return Ok(());
+    }
+
     let pattern_text = match pattern {
         Some(pattern) => pattern,
         None => {
@@ -99,7 +172,7 @@ pub async fn run_main<T: Reporter>(
     let FileSearchResults {
         total_match_count,
         matches,
-    } = run(
+    } = run_with_options(
         &pattern_text,
         limit,
         &search_directory,
@@ -107,6 +180,10 @@ pub async fn run_main<T: Reporter>(
         threads,
         cancel_flag,
         compute_indices,
+        ignore_file,
+        no_ignore,
+        only_codexignore,
+        only_aiignore,
     )?;
     let match_count = matches.len();
     let matches_truncated = total_match_count > match_count;
@@ -132,6 +209,35 @@ pub fn run(
     cancel_flag: Arc<AtomicBool>,
     compute_indices: bool,
 ) -> anyhow::Result<FileSearchResults> {
+    run_with_options(
+        pattern_text,
+        limit,
+        search_directory,
+        exclude,
+        threads,
+        cancel_flag,
+        compute_indices,
+        vec![], // ignore_file
+        false,  // no_ignore
+        false,  // only_codexignore
+        false,  // only_aiignore
+    )
+}
+
+/// Extended version of run with ignore options
+pub fn run_with_options(
+    pattern_text: &str,
+    limit: NonZero<usize>,
+    search_directory: &Path,
+    exclude: Vec<String>,
+    threads: NonZero<usize>,
+    cancel_flag: Arc<AtomicBool>,
+    compute_indices: bool,
+    ignore_file: Vec<PathBuf>,
+    no_ignore: bool,
+    only_codexignore: bool,
+    only_aiignore: bool,
+) -> anyhow::Result<FileSearchResults> {
     let pattern = create_pattern(pattern_text);
     // Create one BestMatchesList per worker thread so that each worker can
     // operate independently. The results across threads will be merged when
@@ -151,8 +257,14 @@ pub fn run(
         .collect();
 
     // Create the ignore matcher for .codexignore and .aiignore files
-    let ignore_matcher = match create_ignore_matcher(search_directory) {
-        Ok(matcher) => Some(Arc::new(matcher)),
+    let ignore_matcher = match create_ignore_matcher_with_options(
+        search_directory,
+        &ignore_file,
+        no_ignore,
+        only_codexignore,
+        only_aiignore,
+    ) {
+        Ok(matcher) => matcher.map(Arc::new),
         Err(e) => {
             // Log the error but continue without ignore matching
             tracing::warn!("Failed to create ignore matcher: {}", e);
@@ -206,7 +318,7 @@ pub fn run(
                 } else {
                     false
                 };
-                
+
                 if !should_ignore {
                     best_list.insert(path);
                 }
@@ -391,9 +503,70 @@ fn create_pattern(pattern: &str) -> Pattern {
     )
 }
 
+/// Create an ignore matcher with CLI options
+fn create_ignore_matcher_with_options(
+    project_root: &Path,
+    additional_ignore_files: &[PathBuf],
+    no_ignore: bool,
+    only_codexignore: bool,
+    only_aiignore: bool,
+) -> anyhow::Result<Option<ignore_support::IgnoreMatcher>> {
+    use ignore_support::Family;
+    use ignore_support::IgnoreDiscovery;
+    use ignore_support::IgnoreMatcher;
+
+    if no_ignore {
+        return Ok(None);
+    }
+
+    // Create discovery instance with explicit controls
+    let discovery = IgnoreDiscovery::with_controls(
+        only_codexignore, // ai_disabled if only_codexignore is true
+        only_aiignore,    // codex_disabled if only_aiignore is true
+        false,            // all_disabled is handled above
+    );
+
+    // Add additional ignore files from CLI
+    let mut sources = discovery.discover(project_root)?;
+    let mut order = sources.len();
+
+    for additional_file in additional_ignore_files {
+        let family = if additional_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.contains(".aiignore"))
+            .unwrap_or(false)
+        {
+            Family::Ai
+        } else {
+            Family::Codex
+        };
+
+        sources.push(ignore_support::IgnoreSource {
+            file_path: additional_file.clone(),
+            family,
+            scope: ignore_support::Scope::ProjectRoot,
+            dir: project_root.to_path_buf(),
+            order,
+        });
+        order += 1;
+    }
+
+    if sources.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(IgnoreMatcher::new(
+            sources,
+            project_root.to_path_buf(),
+        )?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn verify_score_is_none_for_non_match() {
@@ -424,5 +597,111 @@ mod tests {
         ];
 
         assert_eq!(matches, expected);
+    }
+
+    #[test]
+    fn test_ignore_functionality_integration() -> anyhow::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        // Create test ignore files and test files
+        fs::write(root.join(".aiignore"), "*.log\n")?;
+        fs::write(root.join(".codexignore"), "!debug.log\n")?;
+        fs::write(root.join("test.txt"), "content")?;
+        fs::write(root.join("debug.log"), "debug info")?;
+        fs::write(root.join("other.log"), "other log")?;
+        fs::write(root.join("app.js"), "code")?;
+
+        let _pattern = create_pattern("");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        // Test with ignore files active
+        let results = run_with_options(
+            "",
+            NonZero::new(10).unwrap(),
+            root,
+            vec![],
+            NonZero::new(1).unwrap(),
+            cancel_flag.clone(),
+            false,
+            vec![], // ignore_file
+            false,  // no_ignore
+            false,  // only_codexignore
+            false,  // only_aiignore
+        )?;
+
+        let paths: Vec<&str> = results.matches.iter().map(|m| m.path.as_str()).collect();
+
+        // Should include debug.log (negated by .codexignore) but not other.log (ignored by .aiignore)
+        assert!(paths.contains(&"debug.log"));
+        assert!(!paths.contains(&"other.log"));
+        assert!(paths.contains(&"test.txt"));
+        assert!(paths.contains(&"app.js"));
+
+        // Test with no ignore
+        let results_no_ignore = run_with_options(
+            "",
+            NonZero::new(10).unwrap(),
+            root,
+            vec![],
+            NonZero::new(1).unwrap(),
+            cancel_flag,
+            false,
+            vec![], // ignore_file
+            true,   // no_ignore = true
+            false,  // only_codexignore
+            false,  // only_aiignore
+        )?;
+
+        let paths_no_ignore: Vec<&str> = results_no_ignore
+            .matches
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect();
+
+        // Should include all files when ignoring is disabled
+        assert!(paths_no_ignore.contains(&"debug.log"));
+        assert!(paths_no_ignore.contains(&"other.log"));
+        assert!(paths_no_ignore.contains(&"test.txt"));
+        assert!(paths_no_ignore.contains(&"app.js"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_only_aiignore_flag() -> anyhow::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+
+        // Create test ignore files
+        fs::write(root.join(".aiignore"), "*.log\n")?;
+        fs::write(root.join(".codexignore"), "!debug.log\n")?;
+        fs::write(root.join("debug.log"), "debug info")?;
+        fs::write(root.join("other.log"), "other log")?;
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        // Test with only .aiignore active (should ignore both .log files)
+        let results = run_with_options(
+            "",
+            NonZero::new(10).unwrap(),
+            root,
+            vec![],
+            NonZero::new(1).unwrap(),
+            cancel_flag,
+            false,
+            vec![], // ignore_file
+            false,  // no_ignore
+            false,  // only_codexignore
+            true,   // only_aiignore = true
+        )?;
+
+        let paths: Vec<&str> = results.matches.iter().map(|m| m.path.as_str()).collect();
+
+        // Both log files should be ignored when only .aiignore is active
+        assert!(!paths.contains(&"debug.log"));
+        assert!(!paths.contains(&"other.log"));
+
+        Ok(())
     }
 }

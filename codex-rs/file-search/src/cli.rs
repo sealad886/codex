@@ -37,6 +37,30 @@ pub struct Cli {
     #[arg(short, long, action = ArgAction::Append)]
     pub exclude: Vec<String>,
 
+    /// Additional ignore files to use (can be specified multiple times)
+    #[arg(long, action = ArgAction::Append)]
+    pub ignore_file: Vec<PathBuf>,
+
+    /// Disable all ignore file processing
+    #[arg(long, default_value = "false")]
+    pub no_ignore: bool,
+
+    /// Only process .codexignore files (disable .aiignore)
+    #[arg(long, default_value = "false")]
+    pub only_codexignore: bool,
+
+    /// Only process .aiignore files (disable .codexignore)
+    #[arg(long, default_value = "false")]
+    pub only_aiignore: bool,
+
+    /// Print effective ignore rules in order and exit
+    #[arg(long, default_value = "false")]
+    pub print_effective_ignore: bool,
+
+    /// Show why a specific path was ignored or included and exit
+    #[arg(long)]
+    pub explain_ignore: Option<PathBuf>,
+
     /// Search pattern.
     pub pattern: Option<String>,
 }
