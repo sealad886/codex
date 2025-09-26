@@ -19,8 +19,10 @@ use std::sync::atomic::Ordering;
 use tokio::process::Command;
 
 mod cli;
+mod ignore_support;
 
 pub use cli::Cli;
+use ignore_support::{create_ignore_matcher, IgnoreMatcher};
 
 /// A single match result returned from the search.
 ///
@@ -148,6 +150,16 @@ pub fn run(
         })
         .collect();
 
+    // Create the ignore matcher for .codexignore and .aiignore files
+    let ignore_matcher = match create_ignore_matcher(search_directory) {
+        Ok(matcher) => Some(Arc::new(matcher)),
+        Err(e) => {
+            // Log the error but continue without ignore matching
+            tracing::warn!("Failed to create ignore matcher: {}", e);
+            None
+        }
+    };
+
     // Use the same tree-walker library that ripgrep uses. We use it directly so
     // that we can leverage the parallelism it provides.
     let mut walk_builder = WalkBuilder::new(search_directory);
@@ -184,10 +196,20 @@ pub fn run(
         let mut processed = 0;
 
         let cancel = cancel_flag.clone();
+        let ignore_matcher_clone = ignore_matcher.clone();
 
         Box::new(move |entry| {
             if let Some(path) = get_file_path(&entry, search_directory) {
-                best_list.insert(path);
+                // Check if the path should be ignored by .codexignore/.aiignore files
+                let should_ignore = if let Some(ref matcher) = ignore_matcher_clone {
+                    matcher.matches(Path::new(path), false)
+                } else {
+                    false
+                };
+                
+                if !should_ignore {
+                    best_list.insert(path);
+                }
             }
 
             processed += 1;

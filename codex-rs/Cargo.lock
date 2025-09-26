@@ -695,6 +695,7 @@ dependencies = [
  "escargot",
  "eventsource-stream",
  "futures",
+ "ignore",
  "indexmap 2.10.0",
  "landlock",
  "libc",
@@ -794,7 +795,9 @@ dependencies = [
  "nucleo-matcher",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
