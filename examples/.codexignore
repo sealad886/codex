@@ -1,0 +1,112 @@
+# Codex Ignore File Example
+# This file uses gitignore-compatible syntax to control which files
+# are included in Codex file searches and operations.
+
+# Build outputs and compiled files
+/target/
+/dist/
+/build/
+*.class
+*.o
+*.so
+*.dylib
+*.dll
+
+# Dependencies and package managers
+node_modules/
+__pycache__/
+.venv/
+vendor/
+.bundle/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Keep important logs
+!debug.log
+!error.log
+
+# Version control
+.git/
+.svn/
+.hg/
+
+# Large binary files (often not useful for code analysis)
+*.pdf
+*.zip
+*.tar.gz
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mov
+
+# Secrets and sensitive files
+.env
+*.key
+*.pem
+secrets.json
+
+# Test coverage and reports
+coverage/
+.nyc_output/
+test-results/
+
+# Documentation builds (keep source, ignore generated)
+docs/_build/
+site/
+_site/
+
+# Platform-specific
+*.dSYM/
+*.xcworkspace/
+*.xcuserdata/
+
+# Language-specific ignores
+# JavaScript/TypeScript
+dist/
+lib/
+es/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Java
+*.jar
+*.war
+*.ear
+
+# Rust
+/target/
+Cargo.lock
+
+# Go
+/bin/
+/pkg/
+
+# C/C++
+*.a
+*.la
+*.exe
+
+# .NET
+bin/
+obj/
+*.dll
+*.pdb
