@@ -1,13 +1,14 @@
 # Codex Ignore Files
 
-Codex supports hierarchical ignore files that control which files are included in file searches and other operations. The ignore system supports both `.codexignore` (canonical) and `.aiignore` (alias) files with gitignore-compatible semantics.
+Codex supports hierarchical ignore files that control which files are included in file searches and other operations. The ignore system supports `.gitignore` (Git standard), `.aiignore` (alias), and `.codexignore` (canonical) files with gitignore-compatible semantics. 
 
 ## File Types
 
-- **`.codexignore`** - The canonical ignore file format
-- **`.aiignore`** - An alias for compatibility with other tools
+- **`.gitignore`** - The Git standard ignore file (processed first)
+- **`.aiignore`** - An alias for compatibility with other tools (processed second)  
+- **`.codexignore`** - The canonical ignore file format (processed last, highest precedence)
 
-When both files exist in the same directory, they are processed in order with `.codexignore` taking precedence over `.aiignore`.
+When multiple files exist in the same directory, they are processed in order with later files able to override earlier ones: `.gitignore` → `.aiignore` → `.codexignore`.
 
 ## Precedence Hierarchy
 
@@ -22,15 +23,17 @@ Ignore files are processed in the following order (lowest to highest precedence)
    - Windows: `%AppData%\codex\ignore`, `%AppData%\ai\ignore`
 
 3. **Project root files**
+   - `.gitignore` in the repository root
    - `.aiignore` in the repository root
    - `.codexignore` in the repository root
 
 4. **Directory-level files** (highest precedence)
-   - `.aiignore` and `.codexignore` in each directory, with files closer to the target path taking precedence
+   - `.gitignore`, `.aiignore` and `.codexignore` in each directory, with files closer to the target path taking precedence
 
 Within the same directory and precedence level:
-- `.aiignore` files are processed first
-- `.codexignore` files are processed second (and can override `.aiignore` patterns)
+- `.gitignore` files are processed first
+- `.aiignore` files are processed second
+- `.codexignore` files are processed third (and can override `.gitignore` and `.aiignore` patterns)
 
 ## Pattern Syntax
 
@@ -68,10 +71,12 @@ test?.js        # ? matches any single character
 
 ## Environment Variables
 
-- `CODEX_IGNORE_FILE` - Comma-separated list of additional ignore files to include
-- `AI_IGNORE_FILE` - Comma-separated list of additional .aiignore-style files to include
+- `GIT_IGNORE_FILE` - Comma-separated list of additional .gitignore files to include
+- `AI_IGNORE_FILE` - Comma-separated list of additional .aiignore files to include  
+- `CODEX_IGNORE_FILE` - Comma-separated list of additional .codexignore files to include
+- `GIT_IGNORE_DISABLE=1` - Disable processing of .gitignore files
+- `AI_IGNORE_DISABLE=1` - Disable processing of .aiignore files
 - `CODEX_IGNORE_DISABLE=1` - Disable processing of .codexignore files
-- `AI_IGNORE_DISABLE=1` - Disable processing of .aiignore files  
 - `CODEX_NO_IGNORE=1` - Disable all ignore file processing
 
 ## CLI Options
@@ -83,8 +88,9 @@ The file search tool supports several ignore-related flags:
 - `--ignore-file <path>` - Add additional ignore files (can be repeated)
 
 ### Family Control (for debugging)
-- `--only-codexignore` - Only process .codexignore files (disable .aiignore)
-- `--only-aiignore` - Only process .aiignore files (disable .codexignore)
+- `--only-gitignore` - Only process .gitignore files (disable .aiignore and .codexignore)
+- `--only-aiignore` - Only process .aiignore files (disable .gitignore and .codexignore)
+- `--only-codexignore` - Only process .codexignore files (disable .gitignore and .aiignore)
 
 ### Debugging and Inspection
 - `--print-effective-ignore` - Show all ignore rules in precedence order and exit
@@ -134,21 +140,26 @@ codex-file-search --only-aiignore pattern
 
 ### Mixed Usage
 
-You can use both `.aiignore` and `.codexignore` files:
+You can use `.gitignore`, `.aiignore` and `.codexignore` files together:
 
-`.aiignore`:
+`.gitignore`:
 ```
 *.log
 *.tmp
 ```
 
-`.codexignore`:
+`.aiignore`:
 ```
-!debug.log    # Override .aiignore to keep debug.log
-/private/     # Add additional ignore rule
+!debug.log    # Override .gitignore to keep debug.log
 ```
 
-Result: All `.log` files except `debug.log` are ignored, plus `.tmp` files and the `/private/` directory.
+`.codexignore`:
+```
+!important.log    # Override .gitignore to keep important.log
+/private/         # Add additional ignore rule
+```
+
+Result: All `.log` files except `debug.log` and `important.log` are ignored, plus `.tmp` files and the `/private/` directory.
 
 ## Migration from .gitignore
 

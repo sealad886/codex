@@ -16,9 +16,11 @@ use std::path::PathBuf;
 /// The family/type of ignore file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
+    /// .gitignore files (Git standard, lowest precedence)
+    Git,
     /// .aiignore files (alias for compatibility)
     Ai,
-    /// .codexignore files (canonical)
+    /// .codexignore files (canonical, highest precedence)
     Codex,
 }
 
@@ -26,6 +28,7 @@ impl Family {
     /// Get the filename for this family
     pub fn filename(&self) -> &'static str {
         match self {
+            Family::Git => ".gitignore",
             Family::Ai => ".aiignore",
             Family::Codex => ".codexignore",
         }
@@ -34,8 +37,18 @@ impl Family {
     /// Get the environment variable prefix for this family
     pub fn env_prefix(&self) -> &'static str {
         match self {
+            Family::Git => "GIT",
             Family::Ai => "AI",
             Family::Codex => "CODEX",
+        }
+    }
+
+    /// Get the order within a directory (lower values processed first)
+    pub fn directory_order(&self) -> u8 {
+        match self {
+            Family::Git => 0,    // .gitignore processed first
+            Family::Ai => 1,     // .aiignore processed second  
+            Family::Codex => 2,  // .codexignore processed last (highest precedence)
         }
     }
 }
@@ -224,6 +237,8 @@ pub struct EffectiveRule {
 
 /// Discover ignore files according to the hierarchy and precedence rules
 pub struct IgnoreDiscovery {
+    /// Whether Git family files are disabled
+    git_disabled: bool,
     /// Whether AI family files are disabled
     ai_disabled: bool,
     /// Whether Codex family files are disabled
@@ -243,11 +258,22 @@ impl Default for IgnoreDiscovery {
 impl IgnoreDiscovery {
     /// Create a new IgnoreDiscovery with environment variable settings
     pub fn new() -> Self {
+        let git_disabled = env::var("GIT_IGNORE_DISABLE").is_ok_and(|v| v == "1");
         let ai_disabled = env::var("AI_IGNORE_DISABLE").is_ok_and(|v| v == "1");
         let codex_disabled = env::var("CODEX_IGNORE_DISABLE").is_ok_and(|v| v == "1");
         let all_disabled = env::var("CODEX_NO_IGNORE").is_ok_and(|v| v == "1");
 
         let mut additional_files = Vec::new();
+
+        // Handle GIT_IGNORE_FILE environment variable
+        if let Ok(files) = env::var("GIT_IGNORE_FILE") {
+            for file_path in files.split(',') {
+                let path = PathBuf::from(file_path.trim());
+                if path.is_absolute() {
+                    additional_files.push((Family::Git, path));
+                }
+            }
+        }
 
         // Handle AI_IGNORE_FILE environment variable
         if let Ok(files) = env::var("AI_IGNORE_FILE") {
@@ -270,6 +296,7 @@ impl IgnoreDiscovery {
         }
 
         Self {
+            git_disabled,
             ai_disabled,
             codex_disabled,
             all_disabled,
@@ -278,8 +305,25 @@ impl IgnoreDiscovery {
     }
 
     /// Create a new IgnoreDiscovery with explicit family controls
-    pub fn with_controls(ai_disabled: bool, codex_disabled: bool, all_disabled: bool) -> Self {
+    pub fn with_controls(
+        git_disabled: bool,
+        ai_disabled: bool,
+        codex_disabled: bool,
+        all_disabled: bool,
+    ) -> Self {
         let mut additional_files = Vec::new();
+
+        // Handle GIT_IGNORE_FILE environment variable
+        if !git_disabled && !all_disabled {
+            if let Ok(files) = env::var("GIT_IGNORE_FILE") {
+                for file_path in files.split(',') {
+                    let path = PathBuf::from(file_path.trim());
+                    if path.is_absolute() {
+                        additional_files.push((Family::Git, path));
+                    }
+                }
+            }
+        }
 
         // Handle AI_IGNORE_FILE environment variable
         if !ai_disabled && !all_disabled {
@@ -306,6 +350,7 @@ impl IgnoreDiscovery {
         }
 
         Self {
+            git_disabled,
             ai_disabled,
             codex_disabled,
             all_disabled,
@@ -322,7 +367,10 @@ impl IgnoreDiscovery {
         let mut sources = Vec::new();
         let mut order = 0;
 
-        // 1. System global files
+        // 1. System global files (in family precedence order)
+        if !self.git_disabled {
+            sources.extend(self.discover_system_global(Family::Git, &mut order)?);
+        }
         if !self.ai_disabled {
             sources.extend(self.discover_system_global(Family::Ai, &mut order)?);
         }
@@ -330,7 +378,10 @@ impl IgnoreDiscovery {
             sources.extend(self.discover_system_global(Family::Codex, &mut order)?);
         }
 
-        // 2. User global files
+        // 2. User global files (in family precedence order)
+        if !self.git_disabled {
+            sources.extend(self.discover_user_global(Family::Git, &mut order)?);
+        }
         if !self.ai_disabled {
             sources.extend(self.discover_user_global(Family::Ai, &mut order)?);
         }
@@ -338,7 +389,17 @@ impl IgnoreDiscovery {
             sources.extend(self.discover_user_global(Family::Codex, &mut order)?);
         }
 
-        // 3. Project root files
+        // 3. Project root files (in family precedence order: .gitignore > .aiignore > .codexignore)
+        if !self.git_disabled {
+            if let Some(source) = self.discover_project_file(
+                project_root,
+                Family::Git,
+                Scope::ProjectRoot,
+                &mut order,
+            )? {
+                sources.push(source);
+            }
+        }
         if !self.ai_disabled {
             if let Some(source) = self.discover_project_file(
                 project_root,
@@ -362,7 +423,8 @@ impl IgnoreDiscovery {
 
         // 4. Additional files from environment/CLI
         for (family, path) in &self.additional_files {
-            if (*family == Family::Ai && self.ai_disabled)
+            if (*family == Family::Git && self.git_disabled)
+                || (*family == Family::Ai && self.ai_disabled)
                 || (*family == Family::Codex && self.codex_disabled)
             {
                 continue;
@@ -394,7 +456,14 @@ impl IgnoreDiscovery {
 
         let mut sources = Vec::new();
 
-        // Add .aiignore then .codexignore for this directory
+        // Add .gitignore, .aiignore, then .codexignore for this directory (in precedence order)
+        if !self.git_disabled {
+            if let Some(source) =
+                self.discover_project_file(dir, Family::Git, Scope::Directory, order)?
+            {
+                sources.push(source);
+            }
+        }
         if !self.ai_disabled {
             if let Some(source) =
                 self.discover_project_file(dir, Family::Ai, Scope::Directory, order)?
@@ -542,12 +611,14 @@ mod tests {
 
     #[test]
     fn test_family_filename() {
+        assert_eq!(Family::Git.filename(), ".gitignore");
         assert_eq!(Family::Ai.filename(), ".aiignore");
         assert_eq!(Family::Codex.filename(), ".codexignore");
     }
 
     #[test]
     fn test_family_env_prefix() {
+        assert_eq!(Family::Git.env_prefix(), "GIT");
         assert_eq!(Family::Ai.env_prefix(), "AI");
         assert_eq!(Family::Codex.env_prefix(), "CODEX");
     }

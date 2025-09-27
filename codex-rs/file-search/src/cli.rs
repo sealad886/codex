@@ -45,13 +45,17 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub no_ignore: bool,
 
-    /// Only process .codexignore files (disable .aiignore)
+    /// Only process .codexignore files (disable .gitignore and .aiignore)
     #[arg(long, default_value = "false")]
     pub only_codexignore: bool,
 
-    /// Only process .aiignore files (disable .codexignore)
+    /// Only process .aiignore files (disable .gitignore and .codexignore)
     #[arg(long, default_value = "false")]
     pub only_aiignore: bool,
+
+    /// Only process .gitignore files (disable .aiignore and .codexignore)
+    #[arg(long, default_value = "false")]
+    pub only_gitignore: bool,
 
     /// Print effective ignore rules in order and exit
     #[arg(long, default_value = "false")]

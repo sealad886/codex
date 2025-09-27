@@ -66,6 +66,7 @@ pub async fn run_main<T: Reporter>(
         no_ignore,
         only_codexignore,
         only_aiignore,
+        only_gitignore,
         print_effective_ignore,
         explain_ignore,
     }: Cli,
@@ -84,6 +85,7 @@ pub async fn run_main<T: Reporter>(
             no_ignore,
             only_codexignore,
             only_aiignore,
+            only_gitignore,
         )?;
 
         if let Some(matcher) = ignore_matcher {
@@ -117,6 +119,7 @@ pub async fn run_main<T: Reporter>(
             no_ignore,
             only_codexignore,
             only_aiignore,
+            only_gitignore,
         )?;
 
         if let Some(matcher) = ignore_matcher {
@@ -129,6 +132,7 @@ pub async fn run_main<T: Reporter>(
                     "{:05} | {:6} | {:12} | {}",
                     i + 1,
                     match source.family {
+                        ignore_support::Family::Git => "git",
                         ignore_support::Family::Ai => "ai",
                         ignore_support::Family::Codex => "codex",
                     },
@@ -184,6 +188,7 @@ pub async fn run_main<T: Reporter>(
         no_ignore,
         only_codexignore,
         only_aiignore,
+        only_gitignore,
     )?;
     let match_count = matches.len();
     let matches_truncated = total_match_count > match_count;
@@ -221,6 +226,7 @@ pub fn run(
         false,  // no_ignore
         false,  // only_codexignore
         false,  // only_aiignore
+        false,  // only_gitignore
     )
 }
 
@@ -237,6 +243,7 @@ pub fn run_with_options(
     no_ignore: bool,
     only_codexignore: bool,
     only_aiignore: bool,
+    only_gitignore: bool,
 ) -> anyhow::Result<FileSearchResults> {
     let pattern = create_pattern(pattern_text);
     // Create one BestMatchesList per worker thread so that each worker can
@@ -256,13 +263,14 @@ pub fn run_with_options(
         })
         .collect();
 
-    // Create the ignore matcher for .codexignore and .aiignore files
+    // Create the ignore matcher for .gitignore, .codexignore and .aiignore files
     let ignore_matcher = match create_ignore_matcher_with_options(
         search_directory,
         &ignore_file,
         no_ignore,
         only_codexignore,
         only_aiignore,
+        only_gitignore,
     ) {
         Ok(matcher) => matcher.map(Arc::new),
         Err(e) => {
@@ -280,7 +288,11 @@ pub fn run_with_options(
         // Allow hidden entries.
         .hidden(false)
         // Don't require git to be present to apply to apply git-related ignore rules.
-        .require_git(false);
+        .require_git(false)
+        // Disable built-in gitignore processing since we handle it ourselves
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false);
 
     if !exclude.is_empty() {
         let mut override_builder = OverrideBuilder::new(search_directory);
@@ -510,6 +522,7 @@ fn create_ignore_matcher_with_options(
     no_ignore: bool,
     only_codexignore: bool,
     only_aiignore: bool,
+    only_gitignore: bool,
 ) -> anyhow::Result<Option<ignore_support::IgnoreMatcher>> {
     use ignore_support::Family;
     use ignore_support::IgnoreDiscovery;
@@ -521,9 +534,10 @@ fn create_ignore_matcher_with_options(
 
     // Create discovery instance with explicit controls
     let discovery = IgnoreDiscovery::with_controls(
-        only_codexignore, // ai_disabled if only_codexignore is true
-        only_aiignore,    // codex_disabled if only_aiignore is true
-        false,            // all_disabled is handled above
+        only_aiignore || only_codexignore, // git_disabled if only_aiignore or only_codexignore is true
+        only_codexignore || only_gitignore, // ai_disabled if only_codexignore or only_gitignore is true
+        only_aiignore || only_gitignore,    // codex_disabled if only_aiignore or only_gitignore is true
+        false,                              // all_disabled is handled above
     );
 
     // Add additional ignore files from CLI
@@ -531,13 +545,14 @@ fn create_ignore_matcher_with_options(
     let mut order = sources.len();
 
     for additional_file in additional_ignore_files {
-        let family = if additional_file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.contains(".aiignore"))
-            .unwrap_or(false)
-        {
-            Family::Ai
+        let family = if let Some(name) = additional_file.file_name().and_then(|name| name.to_str()) {
+            if name.contains(".gitignore") {
+                Family::Git
+            } else if name.contains(".aiignore") {
+                Family::Ai
+            } else {
+                Family::Codex
+            }
         } else {
             Family::Codex
         };
@@ -628,6 +643,7 @@ mod tests {
             false,  // no_ignore
             false,  // only_codexignore
             false,  // only_aiignore
+            false,  // only_gitignore
         )?;
 
         let paths: Vec<&str> = results.matches.iter().map(|m| m.path.as_str()).collect();
@@ -651,6 +667,7 @@ mod tests {
             true,   // no_ignore = true
             false,  // only_codexignore
             false,  // only_aiignore
+            false,  // only_gitignore
         )?;
 
         let paths_no_ignore: Vec<&str> = results_no_ignore
@@ -694,6 +711,7 @@ mod tests {
             false,  // no_ignore
             false,  // only_codexignore
             true,   // only_aiignore = true
+            false,  // only_gitignore
         )?;
 
         let paths: Vec<&str> = results.matches.iter().map(|m| m.path.as_str()).collect();
