@@ -10,6 +10,7 @@ import tempfile
 from dataclasses import (
     dataclass,
 )
+from typing import Optional
 from difflib import unified_diff
 from pathlib import Path
 from shutil import copy2
@@ -463,7 +464,7 @@ def add_trait_impl(
 
 def define_string_enum(
     name: str, enum_values: Any, out: list[str], description: str | None
-) -> None:
+) -> list[str]:
     emit_doc_comment(description, out)
     out.append(STANDARD_DERIVE)
     out.append(f"pub enum {name} {{\n")
@@ -589,7 +590,7 @@ def get_serde_annotation_for_anyof_type(type_name: str) -> str | None:
 
 
 def map_type(
-    typedef: dict[str, any],
+    typedef: dict[str, Any],
     prop_name: str | None = None,
     struct_name: str | None = None,
 ) -> str:
@@ -696,7 +697,7 @@ def rust_prop_name(name: str, is_optional: bool) -> RustProp:
     return RustProp(prop_name, serde_str)
 
 
-def to_snake_case(name: str) -> str:
+def to_snake_case(name: str) -> Optional[str]:
     """Convert a camelCase or PascalCase name to snake_case."""
     snake_case = name[0].lower() + "".join("_" + c.lower() if c.isupper() else c for c in name[1:])
     if snake_case != name:
