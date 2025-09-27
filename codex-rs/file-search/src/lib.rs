@@ -97,7 +97,7 @@ pub async fn run_main<T: Reporter>(
                 &path_to_explain
             };
 
-            let is_dir = search_directory.join(&rel_path).is_dir();
+            let is_dir = search_directory.join(rel_path).is_dir();
             let is_ignored = matcher.matches(rel_path, is_dir);
 
             println!("Path: {}", rel_path.display());
@@ -230,7 +230,18 @@ pub fn run(
     )
 }
 
+/// Options for ignore file processing
+#[derive(Default)]
+pub struct IgnoreOptions {
+    pub ignore_file: Vec<PathBuf>,
+    pub no_ignore: bool,
+    pub only_codexignore: bool,
+    pub only_aiignore: bool,
+    pub only_gitignore: bool,
+}
+
 /// Extended version of run with ignore options
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_options(
     pattern_text: &str,
     limit: NonZero<usize>,
@@ -536,8 +547,8 @@ fn create_ignore_matcher_with_options(
     let discovery = IgnoreDiscovery::with_controls(
         only_aiignore || only_codexignore, // git_disabled if only_aiignore or only_codexignore is true
         only_codexignore || only_gitignore, // ai_disabled if only_codexignore or only_gitignore is true
-        only_aiignore || only_gitignore,    // codex_disabled if only_aiignore or only_gitignore is true
-        false,                              // all_disabled is handled above
+        only_aiignore || only_gitignore, // codex_disabled if only_aiignore or only_gitignore is true
+        false,                           // all_disabled is handled above
     );
 
     // Add additional ignore files from CLI
@@ -545,7 +556,8 @@ fn create_ignore_matcher_with_options(
     let mut order = sources.len();
 
     for additional_file in additional_ignore_files {
-        let family = if let Some(name) = additional_file.file_name().and_then(|name| name.to_str()) {
+        let family = if let Some(name) = additional_file.file_name().and_then(|name| name.to_str())
+        {
             if name.contains(".gitignore") {
                 Family::Git
             } else if name.contains(".aiignore") {

@@ -71,6 +71,7 @@ def main() -> int:
 
 def lint_utf8_ascii(filename: Path, fix: bool) -> bool:
     """Returns True if an error was printed."""
+    raw: bytes = b""
     try:
         with open(filename, "rb") as f:
             raw = f.read()

@@ -182,7 +182,12 @@ def determine_latest_alpha_version() -> str:
         match = pattern.match(tag)
         if not match:
             continue
-        key = tuple(int(match.group(i)) for i in range(1, 5))
+        # Extract exactly 4 integers and create a properly typed tuple
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        patch = int(match.group(3))
+        alpha = int(match.group(4))
+        key = (major, minor, patch, alpha)
         if best_key is None or key > best_key:
             best_key = key
             best_version = (

@@ -463,7 +463,7 @@ def add_trait_impl(
 
 def define_string_enum(
     name: str, enum_values: Any, out: list[str], description: str | None
-) -> None:
+) -> list[str]:
     emit_doc_comment(description, out)
     out.append(STANDARD_DERIVE)
     out.append(f"pub enum {name} {{\n")
@@ -589,7 +589,7 @@ def get_serde_annotation_for_anyof_type(type_name: str) -> str | None:
 
 
 def map_type(
-    typedef: dict[str, any],
+    typedef: dict[str, Any],
     prop_name: str | None = None,
     struct_name: str | None = None,
 ) -> str:
@@ -702,7 +702,7 @@ def to_snake_case(name: str) -> str:
     if snake_case != name:
         return snake_case
     else:
-        return None
+        return ''   # No change, so return Falsey value string
 
 
 def capitalize(name: str) -> str:
