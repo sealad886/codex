@@ -28,6 +28,7 @@ dirs = { workspace = true }
 env-flags = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
+ignore = { workspace = true }
 indexmap = { workspace = true }
 libc = { workspace = true }
 mcp-types = { workspace = true }
