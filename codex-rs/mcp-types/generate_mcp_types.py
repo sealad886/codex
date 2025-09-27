@@ -10,6 +10,7 @@ import tempfile
 from dataclasses import (
     dataclass,
 )
+from typing import Optional
 from difflib import unified_diff
 from pathlib import Path
 from shutil import copy2
@@ -696,13 +697,13 @@ def rust_prop_name(name: str, is_optional: bool) -> RustProp:
     return RustProp(prop_name, serde_str)
 
 
-def to_snake_case(name: str) -> str:
+def to_snake_case(name: str) -> Optional[str]:
     """Convert a camelCase or PascalCase name to snake_case."""
     snake_case = name[0].lower() + "".join("_" + c.lower() if c.isupper() else c for c in name[1:])
     if snake_case != name:
         return snake_case
     else:
-        return ''   # No change, so return Falsey value string
+        return None
 
 
 def capitalize(name: str) -> str:

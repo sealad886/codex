@@ -53,6 +53,8 @@ pub enum Scope {
     User,
     /// Project root ignore files
     ProjectRoot,
+    /// Directory-level ignore files (highest precedence)
+    Directory,
 }
 
 /// A source of ignore patterns with metadata about its origin and precedence
@@ -129,30 +131,44 @@ impl IgnoreMatcher {
     /// Check if a path should be ignored
     ///
     /// Returns true if the path should be ignored, false if it should be included.
+    ///
+    /// This method evaluates all applicable ignore scopes in precedence order,
+    /// allowing later (more specific) rules to override earlier (more general) ones.
     pub fn matches(&self, rel_path: &Path, is_dir: bool) -> bool {
-        // Find the most specific directory matcher for this path
         let path_absolute = self.root.join(rel_path);
-        let mut best_matcher = None;
-        let mut best_dir = PathBuf::new();
+        let mut final_result = false;
 
-        for (dir, matcher) in &self.matchers {
-            if (dir.as_os_str().is_empty() || path_absolute.starts_with(dir))
-                && dir.components().count() > best_dir.components().count()
-            {
-                best_matcher = Some(matcher);
-                best_dir = dir.clone();
-            }
-        }
+        // Collect all applicable matchers with their directory depth for sorting
+        let mut applicable_matchers: Vec<_> = self
+            .matchers
+            .iter()
+            .filter(|(dir, _)| {
+                // Empty dir means global (system/user), always applies
+                dir.as_os_str().is_empty() || path_absolute.starts_with(dir)
+            })
+            .collect();
 
-        if let Some(matcher) = best_matcher {
+        // Sort by directory depth (global first, then increasingly specific directories)
+        applicable_matchers.sort_by_key(|(dir, _)| dir.components().count());
+
+        // Evaluate each applicable matcher in precedence order
+        for (_, matcher) in applicable_matchers {
             match matcher.matched(rel_path, is_dir) {
-                ignore::Match::None => false,
-                ignore::Match::Ignore(_) => true,
-                ignore::Match::Whitelist(_) => false,
+                ignore::Match::None => {
+                    // No rule matched, keep current result
+                }
+                ignore::Match::Ignore(_) => {
+                    // Rule says to ignore, update result
+                    final_result = true;
+                }
+                ignore::Match::Whitelist(_) => {
+                    // Rule says to include (whitelist), update result
+                    final_result = false;
+                }
             }
-        } else {
-            false
         }
+
+        final_result
     }
 
     /// Get all sources used by this matcher
@@ -239,44 +255,10 @@ impl IgnoreDiscovery {
     ) -> Self {
         let mut additional_files = Vec::new();
 
-        // Handle GIT_IGNORE_FILE environment variable
-        if !git_disabled
-            && !all_disabled
-            && let Ok(files) = env::var("GIT_IGNORE_FILE")
-        {
-            for file_path in files.split(',') {
-                let path = PathBuf::from(file_path.trim());
-                if path.is_absolute() {
-                    additional_files.push((Family::Git, path));
-                }
-            }
-        }
-
-        // Handle AI_IGNORE_FILE environment variable
-        if !ai_disabled
-            && !all_disabled
-            && let Ok(files) = env::var("AI_IGNORE_FILE")
-        {
-            for file_path in files.split(',') {
-                let path = PathBuf::from(file_path.trim());
-                if path.is_absolute() {
-                    additional_files.push((Family::Ai, path));
-                }
-            }
-        }
-
-        // Handle CODEX_IGNORE_FILE environment variable
-        if !codex_disabled
-            && !all_disabled
-            && let Ok(files) = env::var("CODEX_IGNORE_FILE")
-        {
-            for file_path in files.split(',') {
-                let path = PathBuf::from(file_path.trim());
-                if path.is_absolute() {
-                    additional_files.push((Family::Codex, path));
-                }
-            }
-        }
+        // Handle environment variable files
+        Self::add_env_files(&mut additional_files, Family::Git, "GIT_IGNORE_FILE");
+        Self::add_env_files(&mut additional_files, Family::Ai, "AI_IGNORE_FILE");
+        Self::add_env_files(&mut additional_files, Family::Codex, "CODEX_IGNORE_FILE");
 
         Self {
             git_disabled,
@@ -318,7 +300,7 @@ impl IgnoreDiscovery {
             sources.extend(self.discover_user_global(Family::Codex, &mut order)?);
         }
 
-        // 3. Project root files (in family precedence order: .gitignore > .aiignore > .codexignore)
+        // 3. Project root files (in family precedence order: .codexignore > .aiignore > .gitignore)
         if !self.git_disabled
             && let Some(source) = self.discover_project_file(
                 project_root,
@@ -350,7 +332,10 @@ impl IgnoreDiscovery {
             sources.push(source);
         }
 
-        // 4. Additional files from environment/CLI
+        // 4. Discover nested directory ignore files
+        sources.extend(self.discover_nested_directories(project_root, &mut order)?);
+
+        // 5. Additional files from environment/CLI
         for (family, path) in &self.additional_files {
             if (*family == Family::Git && self.git_disabled)
                 || (*family == Family::Ai && self.ai_disabled)
@@ -481,6 +466,84 @@ impl IgnoreDiscovery {
                 vec![PathBuf::from(app_data).join(prefix).join("ignore")]
             } else {
                 vec![]
+            }
+        }
+    }
+
+    /// Discover ignore files in nested directories by walking the project tree
+    fn discover_nested_directories(
+        &self,
+        project_root: &Path,
+        order: &mut usize,
+    ) -> Result<Vec<IgnoreSource>> {
+        let mut sources = Vec::new();
+
+        // Walk the directory tree to find ignore files
+        // Use the ignore crate's WalkBuilder for efficient traversal
+        let walker = ignore::WalkBuilder::new(project_root)
+            .hidden(false) // Don't skip hidden files since ignore files might be in hidden dirs
+            .ignore(false) // Don't use any existing ignore files for this discovery
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .build();
+
+        for entry_result in walker {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => continue, // Skip entries we can't read
+            };
+
+            // Only process directories
+            let Some(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let dir_path = entry.path();
+
+            // Skip the project root since we already handled it
+            if dir_path == project_root {
+                continue;
+            }
+
+            // Look for ignore files in this directory
+            for &family in &[Family::Git, Family::Ai, Family::Codex] {
+                // Check if this family is disabled
+                if (family == Family::Git && self.git_disabled)
+                    || (family == Family::Ai && self.ai_disabled)
+                    || (family == Family::Codex && self.codex_disabled)
+                {
+                    continue;
+                }
+
+                let ignore_file = dir_path.join(family.filename());
+                if ignore_file.exists() {
+                    sources.push(IgnoreSource {
+                        file_path: ignore_file,
+                        family,
+                        scope: Scope::Directory,
+                        dir: dir_path.to_path_buf(),
+                        order: *order,
+                    });
+                    *order += 1;
+                }
+            }
+        }
+
+        Ok(sources)
+    }
+
+    /// Helper method to add environment variable sources for a family
+    fn add_env_files(additional_files: &mut Vec<(Family, PathBuf)>, family: Family, env_var: &str) {
+        if let Ok(files) = env::var(env_var) {
+            for file_path in files.split(',') {
+                let path = PathBuf::from(file_path.trim());
+                if path.is_absolute() {
+                    additional_files.push((family, path));
+                }
             }
         }
     }

@@ -89,18 +89,29 @@ pub async fn run_main<T: Reporter>(
         )?;
 
         if let Some(matcher) = ignore_matcher {
-            let rel_path = if path_to_explain.is_absolute() {
-                path_to_explain
-                    .strip_prefix(&search_directory)
-                    .unwrap_or(&path_to_explain)
+            // Resolve to an absolute path, then ensure it is inside the search root
+            let abs = if path_to_explain.is_absolute() {
+                path_to_explain.clone()
             } else {
-                &path_to_explain
+                search_directory.join(&path_to_explain)
+            };
+            let abs = abs.canonicalize().unwrap_or(abs);
+            let rel = match abs.strip_prefix(&search_directory) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => {
+                    println!("Path: {}", abs.display());
+                    println!(
+                        "Ignored: n/a (outside search root: {})",
+                        search_directory.display()
+                    );
+                    return Ok(());
+                }
             };
 
-            let is_dir = search_directory.join(rel_path).is_dir();
-            let is_ignored = matcher.matches(rel_path, is_dir);
+            let is_dir = abs.is_dir();
+            let is_ignored = matcher.matches(&rel, is_dir);
 
-            println!("Path: {}", rel_path.display());
+            println!("Path: {}", rel.display());
             println!("Ignored: {}", is_ignored);
             // TODO: Add detailed explanation with ExplainStep
             return Ok(());
@@ -136,7 +147,12 @@ pub async fn run_main<T: Reporter>(
                         ignore_support::Family::Ai => "ai",
                         ignore_support::Family::Codex => "codex",
                     },
-                    format!("{:?}", source.scope).to_lowercase(),
+                    match source.scope {
+                        ignore_support::Scope::System => "system",
+                        ignore_support::Scope::User => "user",
+                        ignore_support::Scope::ProjectRoot => "project_root",
+                        ignore_support::Scope::Directory => "directory",
+                    },
                     source.file_path.display()
                 );
             }
@@ -333,18 +349,38 @@ pub fn run_with_options(
         let cancel = cancel_flag.clone();
         let ignore_matcher_clone = ignore_matcher.clone();
 
-        Box::new(move |entry| {
-            if let Some(path) = get_file_path(&entry, search_directory) {
-                // Check if the path should be ignored by .codexignore/.aiignore files
-                let should_ignore = if let Some(ref matcher) = ignore_matcher_clone {
-                    matcher.matches(Path::new(path), false)
-                } else {
-                    false
-                };
+        Box::new(move |entry_result| {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => return ignore::WalkState::Continue, // Skip entries we can't read
+            };
 
-                if !should_ignore {
-                    best_list.insert(path);
-                }
+            // Get path relative to search directory
+            let path = entry.path();
+            let rel_path = match path.strip_prefix(search_directory) {
+                Ok(p) => p,
+                Err(_) => return ignore::WalkState::Continue, // Should not happen with walker
+            };
+
+            let file_type = entry.file_type();
+            let is_dir = file_type.is_some_and(|ft| ft.is_dir());
+
+            // Check if the path should be ignored by .codexignore/.aiignore files
+            if let Some(ref matcher) = ignore_matcher_clone
+                && matcher.matches(rel_path, is_dir)
+            {
+                return if is_dir {
+                    // Skip entire directory tree for ignored directories
+                    ignore::WalkState::Skip
+                } else {
+                    // Just continue to next entry for ignored files
+                    ignore::WalkState::Continue
+                };
+            }
+
+            // Only add files (not directories) to the result list
+            if !is_dir && let Some(path_str) = rel_path.to_str() {
+                best_list.insert(path_str);
             }
 
             processed += 1;
@@ -355,24 +391,6 @@ pub fn run_with_options(
             }
         })
     });
-
-    fn get_file_path<'a>(
-        entry_result: &'a Result<ignore::DirEntry, ignore::Error>,
-        search_directory: &std::path::Path,
-    ) -> Option<&'a str> {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => return None,
-        };
-        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-            return None;
-        }
-        let path = entry.path();
-        match path.strip_prefix(search_directory) {
-            Ok(rel_path) => rel_path.to_str(),
-            Err(_) => None,
-        }
-    }
 
     // If the cancel flag is set, we return early with an empty result.
     if cancel_flag.load(Ordering::Relaxed) {
@@ -526,6 +544,20 @@ fn create_pattern(pattern: &str) -> Pattern {
     )
 }
 
+/// Helper to compute which families should be disabled based on --only-* flags
+fn compute_family_disabling(
+    only_codexignore: bool,
+    only_aiignore: bool,
+    only_gitignore: bool,
+) -> (bool, bool, bool) {
+    // When an --only-* flag is set, disable the other families
+    let git_disabled = only_aiignore || only_codexignore;
+    let ai_disabled = only_codexignore || only_gitignore;
+    let codex_disabled = only_aiignore || only_gitignore;
+
+    (git_disabled, ai_disabled, codex_disabled)
+}
+
 /// Create an ignore matcher with CLI options
 fn create_ignore_matcher_with_options(
     project_root: &Path,
@@ -543,12 +575,26 @@ fn create_ignore_matcher_with_options(
         return Ok(None);
     }
 
-    // Create discovery instance with explicit controls
+    // Defensive: ensure only one --only-* is active
+    let only_count = [only_codexignore, only_aiignore, only_gitignore]
+        .into_iter()
+        .filter(|b| *b)
+        .count();
+    if only_count > 1 {
+        anyhow::bail!(
+            "Flags --only-codexignore, --only-aiignore, and --only-gitignore are mutually exclusive; pick exactly one."
+        );
+    }
+
+    // Use helper to compute which families are disabled
+    let (git_disabled, ai_disabled, codex_disabled) =
+        compute_family_disabling(only_codexignore, only_aiignore, only_gitignore);
+
     let discovery = IgnoreDiscovery::with_controls(
-        only_aiignore || only_codexignore, // git_disabled if only_aiignore or only_codexignore is true
-        only_codexignore || only_gitignore, // ai_disabled if only_codexignore or only_gitignore is true
-        only_aiignore || only_gitignore, // codex_disabled if only_aiignore or only_gitignore is true
-        false,                           // all_disabled is handled above
+        git_disabled,
+        ai_disabled,
+        codex_disabled,
+        false, // all_disabled is handled above
     );
 
     // Add additional ignore files from CLI

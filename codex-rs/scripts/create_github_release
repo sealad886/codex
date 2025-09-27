@@ -8,7 +8,6 @@ import subprocess
 import sys
 
 
-# REPO = "openai/codex"
 REPO = "sealad886/codex"
 BRANCH_REF = "heads/main"
 CARGO_TOML_PATH = "codex-rs/Cargo.toml"

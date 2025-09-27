@@ -12,7 +12,7 @@ Co-authored-by: sealad886 <155285242+sealad886@users.noreply.github.com>
 - Add comprehensive CLI flags and integration tests for ignore functionality
 
 Co-authored-by: sealad886 <155285242+sealad886@users.noreply.github.com>
-- Add .gitignore support with hierarchical precedence: .gitignore > .aiignore > .codexignore
+- Add .gitignore support with hierarchical precedence: .codexignore > .aiignore > .gitignore
 
 Co-authored-by: sealad886 <155285242+sealad886@users.noreply.github.com>
 <!-- generated - do not edit -->
